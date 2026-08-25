@@ -1,0 +1,86 @@
+name: scopes
+on:
+  pull_request:
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: PREMISE 1 - is this a fork PR?
+        run: |
+          echo "head_repo=${{ github.event.pull_request.head.repo.full_name }}"
+          echo "base_repo=${{ github.event.pull_request.base.repo.full_name }}"
+          echo "author=${{ github.event.pull_request.user.login }}"
+          echo "author_association=${{ github.event.pull_request.author_association }}"
+          if [ "${{ github.event.pull_request.head.repo.full_name }}" = "${{ github.event.pull_request.base.repo.full_name }}" ]; then
+            echo "VERDICT_FORK=false (same-repository pull request)"
+          else
+            echo "VERDICT_FORK=true"
+          fi
+
+      - name: PREMISE 3 - is a repository secret exposed to this job?
+        env:
+          S: ${{ secrets.TEST_SECRET }}
+        run: |
+          if [ -n "$S" ]; then
+            echo "VERDICT_SECRET=EXPOSED length=${#S}"
+          else
+            echo "VERDICT_SECRET=absent"
+          fi
+
+      - name: PREMISE 2 - can this job's GITHUB_TOKEN write?
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          code=$(curl -s -o /tmp/w.json -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/${{ github.repository }}/labels \
+            -d '{"name":"write-probe-'"$GITHUB_RUN_ID"'","color":"ededed"}')
+          echo "create-label HTTP=$code"
+          if [ "$code" = "201" ]; then
+            echo "VERDICT_TOKEN=WRITE"
+          else
+            echo "VERDICT_TOKEN=read-only"
+            cat /tmp/w.json
+          fi
+
+      - name: baseline gitconfig
+        run: |
+          echo "HOME=$HOME"
+          echo "--- before ---"
+          cat "$HOME/.gitconfig" 2>/dev/null || echo "(none)"
+
+      - name: Get git refs
+        id: refs
+        uses: Mergifyio/gha-mergify-ci@v25
+        with:
+          action: scopes-git-refs
+
+      - name: show outputs
+        run: |
+          echo "base=[${{ steps.refs.outputs.base }}]"
+          echo "head=[${{ steps.refs.outputs.head }}]"
+
+      - name: Get scopes
+        env:
+          BASE: ${{ steps.refs.outputs.base }}
+          HEAD: ${{ steps.refs.outputs.head }}
+        run: |
+          changed=$(git diff --name-only --diff-filter=ACMR "$BASE" "$HEAD" | tr '\n' ' ')
+          echo "changed=[$changed]"
+
+      - name: PREMISE 5 - did truncation occur in this privileged job?
+        if: always()
+        run: |
+          echo "--- after ---"
+          if [ -f "$HOME/.gitconfig" ]; then
+            sz=$(stat -c%s "$HOME/.gitconfig")
+            echo "VERDICT_TRUNCATION=file_exists size=$sz"
+            cat "$HOME/.gitconfig"
+          else
+            echo "VERDICT_TRUNCATION=absent"
+          fi
+          git config --global --list 2>&1 | head -5 || true
