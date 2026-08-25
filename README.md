@@ -1,0 +1,1 @@
+# mergify-samerepo-ci-test
